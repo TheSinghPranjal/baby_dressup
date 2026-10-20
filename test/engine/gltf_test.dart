@@ -60,6 +60,31 @@ void main() {
           expect(mesh.positions[i], isNotNaN);
           expect(mesh.normals[i], isNotNaN);
         }
+        // A cascade used to overwrite the real index buffer with 0, 1, 2, …
+        // which strings the first vertices into long edges. Real triangles
+        // on this mesh are a few centimetres across.
+        final pos = mesh.positions;
+        final idx = mesh.indices;
+        var longEdges = 0;
+        double edge(int a, int b) {
+          final dx = pos[a * 3] - pos[b * 3];
+          final dy = pos[a * 3 + 1] - pos[b * 3 + 1];
+          final dz = pos[a * 3 + 2] - pos[b * 3 + 2];
+          return dx * dx + dy * dy + dz * dz;
+        }
+
+        // Sample. Checking every triangle here has crashed the tester
+        // during finalization; every 17th still catches the 0,1,2 overwrite,
+        // which makes hundreds of edges longer than the real mesh.
+        for (var t = 0; t < idx.length; t += 3 * 17) {
+          final a = idx[t], b = idx[t + 1], c = idx[t + 2];
+          if (edge(a, b) > 0.05 * 0.05 ||
+              edge(b, c) > 0.05 * 0.05 ||
+              edge(c, a) > 0.05 * 0.05) {
+            longEdges++;
+          }
+        }
+        expect(longEdges, 0, reason: '$path index buffer was scrambled');
       }
     },
   );
@@ -171,6 +196,16 @@ void main() {
     expect(scene.triangleCount, greaterThan(8000));
     if (dir != null) {
       await _write(tester, first!, '$dir/mia_default.png');
+    }
+    await _expectSolidModel(
+      tester,
+      lib.modelFor(_state(null))!,
+      scene.cameraFor(size),
+      size,
+    );
+    await _expectAtlasHits(tester, lib.modelFor(_state(null))!);
+    if (dir != null) {
+      await _write(tester, first!, '$dir/mia_default.png');
       scene.animator.turntable = 2.6;
       final back = await tester.runAsync(frame);
       await _write(tester, back!, '$dir/mia_default_back.png');
@@ -203,6 +238,13 @@ void main() {
       expect(scene.activeModelAsset, entry.value);
       final img = await tester.runAsync(frame);
       expect(scene.triangleCount, greaterThan(8000), reason: entry.key);
+      await _expectSolidModel(
+        tester,
+        lib.modelFor(w.state)!,
+        scene.cameraFor(size),
+        size,
+      );
+      await _expectAtlasHits(tester, lib.modelFor(w.state)!);
       if (dir != null) await _write(tester, img!, '$dir/mia_${entry.key}.png');
       img!.dispose();
     }
@@ -254,6 +296,111 @@ Future<ui.Image> _swatch() {
 }
 
 String _hex(int rgb) => '#${rgb.toRadixString(16).padLeft(6, '0')}';
+
+Future<Uint8List> _rgba(WidgetTester tester, ui.Image image) async {
+  final raw = await tester.runAsync(
+    () => image.toByteData(format: ui.ImageByteFormat.rawRgba),
+  );
+  return raw!.buffer.asUint8List();
+}
+
+/// Draws [model] on a flat magenta clear and checks the upper body is a
+/// solid silhouette. Scrambled indices and the upside-down atlas both leave
+/// the backdrop showing through the head and torso.
+Future<void> _expectSolidModel(
+  WidgetTester tester,
+  GltfModel model,
+  OrbitCamera cam,
+  ui.Size size,
+) async {
+  final rec = ui.PictureRecorder();
+  final canvas = ui.Canvas(rec);
+  canvas.drawRect(
+    ui.Offset.zero & size,
+    ui.Paint()..color = const ui.Color(0xFFFF00FF),
+  );
+  const s = MiaLooks.worldScale;
+  SoftRenderer().render(canvas, size, cam, [
+    for (final prim in model.primitives)
+      RenderItem(
+        prim.mesh,
+        Affine.scale(const Vec3(s, s, s)),
+        albedo: prim.albedo,
+        color: prim.tint,
+        gloss: 0.04,
+        doubleSided: prim.doubleSided,
+      ),
+  ]);
+  final image = await tester.runAsync(
+    () => rec.endRecording().toImage(size.width.toInt(), size.height.toInt()),
+  );
+  final bytes = await _rgba(tester, image!);
+  image.dispose();
+
+  final w = size.width.toInt();
+  final h = size.height.toInt();
+  bool magenta(int x, int y) {
+    final i = (y * w + x) * 4;
+    return bytes[i] > 240 && bytes[i + 1] < 20 && bytes[i + 2] > 240;
+  }
+
+  var top = h, bottom = 0, left = w, right = 0;
+  for (var y = 0; y < h; y += 2) {
+    for (var x = 0; x < w; x += 2) {
+      if (magenta(x, y)) continue;
+      if (y < top) top = y;
+      if (y > bottom) bottom = y;
+      if (x < left) left = x;
+      if (x > right) right = x;
+    }
+  }
+  expect(bottom - top, greaterThan(400), reason: model.assetPath);
+  // One pixel down the middle, from the hair to the feet. The gap between
+  // the legs ends the run; head-to-hips on this framing is one continuous
+  // stretch. Scrambled triangles break it every few dozen pixels.
+  final cx = (left + right) ~/ 2;
+  var run = 0, best = 0;
+  for (var y = top; y <= bottom; y += 2) {
+    if (!magenta(cx, y)) {
+      run += 2;
+      if (run > best) best = run;
+    } else {
+      run = 0;
+    }
+  }
+  // ignore: avoid_print
+  print('${model.assetPath} centre run ${best}px of ${bottom - top}px');
+  expect(best, greaterThan(400), reason: '${model.assetPath} centre run $best');
+}
+
+/// Centroid samples of the baked atlas. The V-flip bug put about half of
+/// these in alpha-0 gutter; the stored coordinates do not.
+Future<void> _expectAtlasHits(WidgetTester tester, GltfModel model) async {
+  final prim = model.primitives.single;
+  final image = prim.albedo!;
+  final bytes = await _rgba(tester, image);
+  final mesh = prim.mesh;
+  final uvs = mesh.uvs!;
+  final idx = mesh.indices;
+  final w = image.width;
+  final h = image.height;
+  var n = 0, opaque = 0;
+  for (var t = 0; t < idx.length; t += 33) {
+    final i0 = idx[t], i1 = idx[t + 1], i2 = idx[t + 2];
+    final u = (uvs[i0 * 2] + uvs[i1 * 2] + uvs[i2 * 2]) / 3;
+    final v = (uvs[i0 * 2 + 1] + uvs[i1 * 2 + 1] + uvs[i2 * 2 + 1]) / 3;
+    final x = (u * (w - 1)).round().clamp(0, w - 1);
+    final y = (v * (h - 1)).round().clamp(0, h - 1);
+    n++;
+    if (bytes[(y * w + x) * 4 + 3] > 200) opaque++;
+  }
+  expect(
+    opaque / n,
+    greaterThan(0.95),
+    reason:
+        '${model.assetPath} atlas hit ${(opaque / n * 100).toStringAsFixed(1)}%',
+  );
+}
 
 Future<void> _write(WidgetTester tester, ui.Image image, String path) async {
   final png = await tester.runAsync(

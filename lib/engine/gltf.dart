@@ -35,8 +35,14 @@ class GltfDocument {
 /// geometry, embedded images, and node TRS or matrix transforms.
 ///
 /// glTF is Y-up, faces +Z, with counterclockwise front faces — the same
-/// convention as [Mesh]. Texture V is flipped to Flutter's top-left origin.
-/// There is no skinning: a rigged file is loaded in its bind pose.
+/// convention as [Mesh]. There is no skinning: a rigged file is loaded in
+/// its bind pose.
+///
+/// TEXCOORD_0 is kept as stored. The closet GLBs were baked with V = 0 at
+/// the top of the embedded image, which is already Flutter's sample origin.
+/// Flipping V (the glTF bottom-left convention) lands most triangles in the
+/// transparent gutter or on an unrelated island, so the figure draws as a
+/// see-through patchwork.
 GltfDocument parseGlb(Uint8List bytes) {
   if (bytes.length < 20) {
     throw const FormatException('GLB is too small');
@@ -192,11 +198,19 @@ GltfPrimitiveData _primitive(
     throw const FormatException('Mesh is missing POSITION');
   }
   var positions = reader.readVec3(positionIndex);
-  var indices =
-      prim['indices'] is int
-            ? reader.readIndices(prim['indices'] as int)
-            : Uint32List(positions.length ~/ 3)
-        ..setAll(0, List.generate(positions.length ~/ 3, (i) => i));
+  // The cascade must not apply to both branches. `..setAll` binds looser
+  // than `?:`, so writing it on the else branch also overwrites a real
+  // index buffer with 0, 1, 2, … and the mesh draws as scrambled shards.
+  final Uint32List indices;
+  if (prim['indices'] is int) {
+    indices = reader.readIndices(prim['indices'] as int);
+  } else {
+    final n = positions.length ~/ 3;
+    indices = Uint32List(n);
+    for (var i = 0; i < n; i++) {
+      indices[i] = i;
+    }
+  }
 
   if (!_isIdentity(world)) {
     final moved = Float32List(positions.length);
@@ -221,11 +235,8 @@ GltfPrimitiveData _primitive(
   Float32List? uvs;
   final uvIndex = attrs['TEXCOORD_0'];
   if (uvIndex is int) {
+    // Do not flip V. See the note on [parseGlb].
     uvs = reader.readVec2(uvIndex);
-    // glTF V = 0 is the bottom of the image. Flutter samples V = 0 at the top.
-    for (var i = 1; i < uvs.length; i += 2) {
-      uvs[i] = 1.0 - uvs[i];
-    }
   }
 
   final normals = attrs['NORMAL'] is int && _isIdentity(world)

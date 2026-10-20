@@ -349,7 +349,7 @@ class SoftRenderer {
         outCol[k * 3 + j] = _vc[vi];
         if (outUv != null && image != null) {
           // ImageShader samples in pixels. Mesh UVs stay in 0..1, V = 0 at
-          // the top of the image (glTF's bottom-left origin is flipped on load).
+          // the top of the image.
           outUv[o] = _vu[vi] * image.width;
           outUv[o + 1] = _vv[vi] * image.height;
         }
@@ -386,7 +386,10 @@ class SoftRenderer {
         0, 0, 1, 0, //
         0, 0, 0, 1,
       ]),
-      filterQuality: ui.FilterQuality.medium,
+      // medium/high build mipmaps. These atlases are mostly empty gutter, so
+      // a mip level averages the colour islands with alpha 0 and the figure
+      // draws as translucent shards. low is bilinear on the base level.
+      filterQuality: ui.FilterQuality.low,
     );
     _shaders[image] = shader;
     return shader;
