@@ -22,11 +22,24 @@ class RenderItem {
   /// eyes, brows and buttons) so stacked layers never interleave.
   final bool decal;
 
-  const RenderItem(this.mesh, this.transform,
-      {this.color = 0xFFFFFFFF,
-      this.gloss = 0.1,
-      this.depthBias = 0,
-      this.decal = false});
+  /// Albedo texture. When set, [mesh] UVs are sampled and multiplied by the
+  /// per-vertex light. [color] tints the texture (white leaves it unchanged).
+  final ui.Image? albedo;
+
+  /// Draw both windings. glTF materials can request this; procedural meshes
+  /// that need an inside face use [Mesh.doubleSided] instead.
+  final bool doubleSided;
+
+  const RenderItem(
+    this.mesh,
+    this.transform, {
+    this.color = 0xFFFFFFFF,
+    this.gloss = 0.1,
+    this.depthBias = 0,
+    this.decal = false,
+    this.albedo,
+    this.doubleSided = false,
+  });
 }
 
 /// Orbit camera looking at a target on the Y axis.
@@ -38,13 +51,14 @@ class OrbitCamera {
   double fovY;
   double screenOffsetY; // pixels; shifts the target on screen
 
-  OrbitCamera(
-      {this.pitch = 0.08,
-      this.distance = 3.2,
-      this.targetY = 0.82,
-      this.targetX = 0,
-      this.fovY = 0.62,
-      this.screenOffsetY = 0});
+  OrbitCamera({
+    this.pitch = 0.08,
+    this.distance = 3.2,
+    this.targetY = 0.82,
+    this.targetX = 0,
+    this.fovY = 0.62,
+    this.screenOffsetY = 0,
+  });
 
   Affine get view =>
       Affine.translation(Vec3(0, 0, -distance)) *
@@ -52,20 +66,23 @@ class OrbitCamera {
       Affine.translation(Vec3(-targetX, -targetY, 0));
 
   OrbitCamera copy() => OrbitCamera(
-      pitch: pitch,
-      distance: distance,
-      targetY: targetY,
-      targetX: targetX,
-      fovY: fovY,
-      screenOffsetY: screenOffsetY);
+    pitch: pitch,
+    distance: distance,
+    targetY: targetY,
+    targetX: targetX,
+    fovY: fovY,
+    screenOffsetY: screenOffsetY,
+  );
 
   /// Projects a world-space point to screen coordinates.
   ui.Offset project(Vec3 world, ui.Size size) {
     final v = view.point(world);
     final f = size.height / (2 * math.tan(fovY / 2));
     final iz = 1 / math.max(0.05, -v.z);
-    return ui.Offset(size.width / 2 + f * v.x * iz,
-        size.height / 2 + screenOffsetY - f * v.y * iz);
+    return ui.Offset(
+      size.width / 2 + f * v.x * iz,
+      size.height / 2 + screenOffsetY - f * v.y * iz,
+    );
   }
 }
 
@@ -98,32 +115,61 @@ class Lighting {
 /// and submits everything to Skia/Impeller as one `drawVertices` call.
 class SoftRenderer {
   Float32List _vx = Float32List(0), _vy = Float32List(0), _vz = Float32List(0);
+  Float32List _vu = Float32List(0), _vv = Float32List(0);
   Int32List _vc = Int32List(0);
   Float64List _triDepth = Float64List(0);
   Int32List _triV = Int32List(0); // 3 global vertex indices per triangle
+  Int32List _triTex = Int32List(0); // index into the frame's texture table
   Int32List _order = Int32List(0);
   final Int32List _bucket = Int32List(_buckets + 1);
   static const _buckets = 8192;
+  final Map<ui.Image, ui.ImageShader> _shaders = {};
 
   int lastTriangleCount = 0;
 
-  void render(ui.Canvas canvas, ui.Size size, OrbitCamera camera,
-      List<RenderItem> items,
-      {Lighting light = Lighting.studio}) {
+  void render(
+    ui.Canvas canvas,
+    ui.Size size,
+    OrbitCamera camera,
+    List<RenderItem> items, {
+    Lighting light = Lighting.studio,
+  }) {
     var vTotal = 0, tTotal = 0;
     for (final it in items) {
       vTotal += it.mesh.vertexCount;
       tTotal += it.mesh.triangleCount;
     }
+    var anyTex = false;
+    for (final it in items) {
+      if (it.albedo != null) {
+        anyTex = true;
+        break;
+      }
+    }
+    // 0 is "no texture". Textured draws batch triangles that share an image
+    // after the depth sort so a model can mix materials without a z-buffer.
+    final texTable = <ui.Image?>[null];
+    int texIndex(ui.Image? image) {
+      if (image == null) return 0;
+      for (var i = 1; i < texTable.length; i++) {
+        if (identical(texTable[i], image)) return i;
+      }
+      texTable.add(image);
+      return texTable.length - 1;
+    }
+
     if (_vx.length < vTotal) {
       _vx = Float32List(vTotal);
       _vy = Float32List(vTotal);
       _vz = Float32List(vTotal);
+      _vu = Float32List(vTotal);
+      _vv = Float32List(vTotal);
       _vc = Int32List(vTotal);
     }
     if (_triDepth.length < tTotal) {
       _triDepth = Float64List(tTotal);
       _triV = Int32List(tTotal * 3);
+      _triTex = Int32List(tTotal);
       _order = Int32List(tTotal);
     }
 
@@ -172,31 +218,56 @@ class SoftRenderer {
           ny /= nl;
           nz /= nl;
         }
-        final albedo = cols != null ? _mulArgb(cols[i], it.color) : it.color;
-        final ar = ((albedo >> 16) & 255).toDouble();
-        final ag = ((albedo >> 8) & 255).toDouble();
-        final ab = (albedo & 255).toDouble();
-
-        final kd = ((nx * key.x + ny * key.y + nz * key.z) + 0.35) / 1.35;
-        final fd = ((nx * fill.x + ny * fill.y + nz * fill.z) + 0.2) / 1.2;
-        final diff = light.keyStrength * (kd < 0 ? 0 : kd) +
-            light.fillStrength * (fd < 0 ? 0 : fd);
-        final hemi = 0.5 + 0.5 * ny;
-        final ambR = 0.42 * (grR + (skyR - grR) * hemi);
-        final ambG = 0.42 * (grG + (skyG - grG) * hemi);
-        final ambB = 0.42 * (grB + (skyB - grB) * hemi);
-        final nh = (nx * hx + ny * hy + nz * hz) / hl;
-        final spec = nh > 0 ? gloss * 190 * math.pow(nh, 28) : 0.0;
         final edge = 1 - (nz < 0 ? 0 : nz);
         final rim = edge * edge * edge;
+        // Textures shipped with Mia are already painted. A light wrap keeps
+        // the turntable readable without crushing the albedo.
+        if (it.albedo != null) {
+          final uvs = mesh.uvs;
+          if (uvs != null) {
+            _vu[gi] = uvs[i * 2];
+            _vv[gi] = uvs[i * 2 + 1];
+          }
+          final ndl = nx * key.x + ny * key.y + nz * key.z;
+          final wrap = ndl > 0 ? ndl : 0.0;
+          final fdl = nx * fill.x + ny * fill.y + nz * fill.z;
+          final fillW = fdl > 0 ? fdl : 0.0;
+          final lit = (0.80 + 0.22 * wrap + 0.08 * fillW);
+          final tr = ((it.color >> 16) & 255) * lit + rim * rimR * 0.35;
+          final tg = ((it.color >> 8) & 255) * lit + rim * rimG * 0.35;
+          final tb = (it.color & 255) * lit + rim * rimB * 0.35;
+          _vc[gi] =
+              0xFF000000 |
+              (tr > 255 ? 255 : tr.toInt()) << 16 |
+              (tg > 255 ? 255 : tg.toInt()) << 8 |
+              (tb > 255 ? 255 : tb.toInt());
+        } else {
+          final albedo = cols != null ? _mulArgb(cols[i], it.color) : it.color;
+          final ar = ((albedo >> 16) & 255).toDouble();
+          final ag = ((albedo >> 8) & 255).toDouble();
+          final ab = (albedo & 255).toDouble();
 
-        final r = ar * (ambR + diff) + spec + rim * rimR;
-        final g = ag * (ambG + diff) + spec + rim * rimG;
-        final b = ab * (ambB + diff) + spec + rim * rimB;
-        _vc[gi] = 0xFF000000 |
-            (r > 255 ? 255 : r.toInt()) << 16 |
-            (g > 255 ? 255 : g.toInt()) << 8 |
-            (b > 255 ? 255 : b.toInt());
+          final kd = ((nx * key.x + ny * key.y + nz * key.z) + 0.35) / 1.35;
+          final fd = ((nx * fill.x + ny * fill.y + nz * fill.z) + 0.2) / 1.2;
+          final diff =
+              light.keyStrength * (kd < 0 ? 0 : kd) +
+              light.fillStrength * (fd < 0 ? 0 : fd);
+          final hemi = 0.5 + 0.5 * ny;
+          final ambR = 0.42 * (grR + (skyR - grR) * hemi);
+          final ambG = 0.42 * (grG + (skyG - grG) * hemi);
+          final ambB = 0.42 * (grB + (skyB - grB) * hemi);
+          final nh = (nx * hx + ny * hy + nz * hz) / hl;
+          final spec = nh > 0 ? gloss * 190 * math.pow(nh, 28) : 0.0;
+
+          final r = ar * (ambR + diff) + spec + rim * rimR;
+          final g = ag * (ambG + diff) + spec + rim * rimG;
+          final b = ab * (ambB + diff) + spec + rim * rimB;
+          _vc[gi] =
+              0xFF000000 |
+              (r > 255 ? 255 : r.toInt()) << 16 |
+              (g > 255 ? 255 : g.toInt()) << 8 |
+              (b > 255 ? 255 : b.toInt());
+        }
       }
 
       final idx = mesh.indices;
@@ -211,11 +282,13 @@ class SoftRenderer {
         final i2 = vBase + idx[t + 2];
         final z0 = _vz[i0], z1 = _vz[i1], z2 = _vz[i2];
         if (z0 > -0.05 || z1 > -0.05 || z2 > -0.05) continue; // near clip
-        final area = (_vx[i1] - _vx[i0]) * (_vy[i2] - _vy[i0]) -
+        final area =
+            (_vx[i1] - _vx[i0]) * (_vy[i2] - _vy[i0]) -
             (_vx[i2] - _vx[i0]) * (_vy[i1] - _vy[i0]);
-        if (area >= 0) continue; // back face (screen space is y-down)
+        if (!it.doubleSided && area >= 0) continue; // back face (y-down)
         final d = (flat ?? (z0 + z1 + z2) / 3) + bias;
         _triDepth[tCount] = d;
+        _triTex[tCount] = anyTex ? texIndex(it.albedo) : 0;
         _triV[tCount * 3] = i0;
         _triV[tCount * 3 + 1] = i1;
         _triV[tCount * 3 + 2] = i2;
@@ -243,21 +316,80 @@ class SoftRenderer {
       _order[_bucket[b]++] = t;
     }
 
-    final outPos = Float32List(tCount * 6);
-    final outCol = Int32List(tCount * 3);
-    for (var k = 0; k < tCount; k++) {
-      final t = _order[k];
-      for (var j = 0; j < 3; j++) {
-        final vi = _triV[t * 3 + j];
-        outPos[k * 6 + j * 2] = _vx[vi];
-        outPos[k * 6 + j * 2 + 1] = _vy[vi];
-        outCol[k * 3 + j] = _vc[vi];
+    if (!anyTex) {
+      _emit(canvas, 0, tCount, null);
+      return;
+    }
+    // Depth order is global; split it into runs that share a texture so each
+    // drawVertices call can carry one ImageShader.
+    var run = 0;
+    var runTex = _triTex[_order[0]];
+    for (var k = 1; k <= tCount; k++) {
+      final tex = k < tCount ? _triTex[_order[k]] : -1;
+      if (tex != runTex) {
+        _emit(canvas, run, k, texTable[runTex]);
+        run = k;
+        runTex = tex;
       }
     }
-    final vertices = ui.Vertices.raw(ui.VertexMode.triangles, outPos,
-        colors: outCol);
-    canvas.drawVertices(vertices, ui.BlendMode.dst, ui.Paint());
+  }
+
+  void _emit(ui.Canvas canvas, int from, int to, ui.Image? image) {
+    final count = to - from;
+    final outPos = Float32List(count * 6);
+    final outCol = Int32List(count * 3);
+    final outUv = image != null ? Float32List(count * 6) : null;
+    for (var k = 0; k < count; k++) {
+      final t = _order[from + k];
+      for (var j = 0; j < 3; j++) {
+        final vi = _triV[t * 3 + j];
+        final o = k * 6 + j * 2;
+        outPos[o] = _vx[vi];
+        outPos[o + 1] = _vy[vi];
+        outCol[k * 3 + j] = _vc[vi];
+        if (outUv != null && image != null) {
+          // ImageShader samples in pixels. Mesh UVs stay in 0..1, V = 0 at
+          // the top of the image (glTF's bottom-left origin is flipped on load).
+          outUv[o] = _vu[vi] * image.width;
+          outUv[o + 1] = _vv[vi] * image.height;
+        }
+      }
+    }
+    final vertices = ui.Vertices.raw(
+      ui.VertexMode.triangles,
+      outPos,
+      textureCoordinates: outUv,
+      colors: outCol,
+    );
+    final paint = ui.Paint();
+    var mode = ui.BlendMode.dst;
+    if (image != null) {
+      paint.shader = _shaderFor(image);
+      // Vertex light × texture sample.
+      mode = ui.BlendMode.modulate;
+    }
+    canvas.drawVertices(vertices, mode, paint);
     vertices.dispose();
+  }
+
+  ui.ImageShader _shaderFor(ui.Image image) {
+    final cached = _shaders[image];
+    if (cached != null) return cached;
+    // Identity: texture coordinates are already in image pixels.
+    final shader = ui.ImageShader(
+      image,
+      ui.TileMode.clamp,
+      ui.TileMode.clamp,
+      Float64List.fromList(const [
+        1, 0, 0, 0, //
+        0, 1, 0, 0, //
+        0, 0, 1, 0, //
+        0, 0, 0, 1,
+      ]),
+      filterQuality: ui.FilterQuality.medium,
+    );
+    _shaders[image] = shader;
+    return shader;
   }
 
   static int _mulArgb(int a, int b) {

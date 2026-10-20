@@ -14,7 +14,12 @@ class Mesh {
   final Uint32List indices;
   final Int32List? colors;
 
-  Mesh(this.positions, this.normals, this.indices, [this.colors]);
+  /// Optional UV coordinates, two floats per vertex. V = 0 is the top of the
+  /// texture, matching Flutter's [ImageShader] (glTF's bottom-left origin is
+  /// flipped when a model is loaded).
+  final Float32List? uvs;
+
+  Mesh(this.positions, this.normals, this.indices, [this.colors, this.uvs]);
 
   late final Vec3 center = () {
     final b = bounds();
@@ -28,8 +33,11 @@ class Mesh {
       Vec3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
 
   /// Builds a mesh from raw vertex/index lists and computes smooth normals.
-  factory Mesh.fromLists(List<Vec3> verts, List<int> tris,
-      {List<int>? colors}) {
+  factory Mesh.fromLists(
+    List<Vec3> verts,
+    List<int> tris, {
+    List<int>? colors,
+  }) {
     final pos = Float32List(verts.length * 3);
     for (var i = 0; i < verts.length; i++) {
       pos[i * 3] = verts[i].x;
@@ -37,11 +45,17 @@ class Mesh {
       pos[i * 3 + 2] = verts[i].z;
     }
     final idx = Uint32List.fromList(tris);
-    return Mesh(pos, _computeNormals(pos, idx), idx,
-        colors == null ? null : Int32List.fromList(colors));
+    return Mesh(
+      pos,
+      computeNormals(pos, idx),
+      idx,
+      colors == null ? null : Int32List.fromList(colors),
+    );
   }
 
-  static Float32List _computeNormals(Float32List pos, Uint32List idx) {
+  /// Smooth normals from triangle faces. Shared by the procedural builders
+  /// and the glTF loader.
+  static Float32List computeNormals(Float32List pos, Uint32List idx) {
     final n = Float32List(pos.length);
     for (var t = 0; t < idx.length; t += 3) {
       final i0 = idx[t] * 3, i1 = idx[t + 1] * 3, i2 = idx[t + 2] * 3;
@@ -58,7 +72,9 @@ class Mesh {
       }
     }
     for (var i = 0; i < n.length; i += 3) {
-      final l = math.sqrt(n[i] * n[i] + n[i + 1] * n[i + 1] + n[i + 2] * n[i + 2]);
+      final l = math.sqrt(
+        n[i] * n[i] + n[i + 1] * n[i + 1] + n[i + 2] * n[i + 2],
+      );
       if (l > 1e-12) {
         n[i] /= l;
         n[i + 1] /= l;
@@ -80,7 +96,8 @@ class Mesh {
       pos[i + 2] = p.z;
     }
     // A mirroring transform flips winding; restore outward orientation.
-    final det = m.a * (m.e * m.i - m.f * m.h) -
+    final det =
+        m.a * (m.e * m.i - m.f * m.h) -
         m.b * (m.d * m.i - m.f * m.g) +
         m.c * (m.d * m.h - m.e * m.g);
     final idx = Uint32List.fromList(indices);
@@ -91,7 +108,7 @@ class Mesh {
         idx[t + 2] = tmp;
       }
     }
-    return Mesh(pos, _computeNormals(pos, idx), idx, colors);
+    return Mesh(pos, computeNormals(pos, idx), idx, colors, uvs);
   }
 
   /// Adds back faces (reversed winding, flipped normals) so open surfaces such
@@ -106,7 +123,8 @@ class Mesh {
     for (var i = 0; i < normals.length; i++) {
       nrm[normals.length + i] = -normals[i];
     }
-    final idx = Uint32List(indices.length * 2)..setRange(0, indices.length, indices);
+    final idx = Uint32List(indices.length * 2)
+      ..setRange(0, indices.length, indices);
     for (var t = 0; t < indices.length; t += 3) {
       idx[indices.length + t] = indices[t] + vc;
       idx[indices.length + t + 1] = indices[t + 2] + vc;
@@ -119,17 +137,25 @@ class Mesh {
         cols[vc + i] = shadeArgb(colors![i], innerShade);
       }
     }
-    return Mesh(pos, nrm, idx, cols);
+    Float32List? uv2;
+    if (uvs != null) {
+      uv2 = Float32List(uvs!.length * 2)
+        ..setRange(0, uvs!.length, uvs!)
+        ..setRange(uvs!.length, uvs!.length * 2, uvs!);
+    }
+    return Mesh(pos, nrm, idx, cols, uv2);
   }
 
   /// Paints per-vertex colours using [fn] (local position, normal) -> ARGB.
   Mesh painted(int Function(Vec3 p, Vec3 n) fn) {
     final cols = Int32List(vertexCount);
     for (var i = 0; i < vertexCount; i++) {
-      cols[i] = fn(vertex(i),
-          Vec3(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]));
+      cols[i] = fn(
+        vertex(i),
+        Vec3(normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]),
+      );
     }
-    return Mesh(positions, normals, indices, cols);
+    return Mesh(positions, normals, indices, cols, uvs);
   }
 
   /// Uniformly colours the mesh (useful before merging differently coloured
@@ -147,6 +173,8 @@ class Mesh {
     final nrm = Float32List(vTotal * 3);
     final idx = Uint32List(iTotal);
     final cols = anyColors ? Int32List(vTotal) : null;
+    final anyUv = meshes.any((m) => m.uvs != null);
+    final uvs = anyUv ? Float32List(vTotal * 2) : null;
     var vo = 0, io = 0;
     for (final m in meshes) {
       pos.setRange(vo * 3, vo * 3 + m.positions.length, m.positions);
@@ -159,16 +187,24 @@ class Mesh {
           cols[vo + k] = m.colors?[k] ?? 0xFFFFFFFF;
         }
       }
+      if (uvs != null) {
+        final src = m.uvs;
+        if (src != null) {
+          uvs.setRange(vo * 2, vo * 2 + src.length, src);
+        }
+      }
       vo += m.vertexCount;
       io += m.indices.length;
     }
-    return Mesh(pos, nrm, idx, cols);
+    return Mesh(pos, nrm, idx, cols, uvs);
   }
 
   /// Axis-aligned bounds as [min, max].
   List<Vec3> bounds() {
     var minX = double.infinity, minY = double.infinity, minZ = double.infinity;
-    var maxX = -double.infinity, maxY = -double.infinity, maxZ = -double.infinity;
+    var maxX = -double.infinity,
+        maxY = -double.infinity,
+        maxZ = -double.infinity;
     for (var i = 0; i < positions.length; i += 3) {
       minX = math.min(minX, positions[i]);
       maxX = math.max(maxX, positions[i]);
