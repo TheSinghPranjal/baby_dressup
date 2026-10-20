@@ -43,7 +43,7 @@ Add a `CharacterDefinition` to `kCharacters`. Give her a skin tone, eye, hair, b
 
 - Y-up, facing +Z, feet at y = 0, 1.0 unit tall, centred on X/Z. The dressing room scales her by `MiaLooks.worldScale` (1.6) so she matches the other characters. Do not bake that scale into the file.
 - One material, one embedded base-color image. No skeleton. A rigged file would be drawn in its bind pose.
-- UVs use the glTF bottom-left origin; the loader flips V.
+- TEXCOORD_0 uses V = 0 at the **top** of the embedded image (Flutter's origin). The loader does not flip V. These atlases are mostly empty transparent gutter; the spec's bottom-left flip samples that gutter and draws a shattered, see-through figure. A Blender export that follows the glTF bottom-left convention needs its V flipped in the file before it will match.
 
 To add a top, export `some_top.glb` into that folder, add the path under `assets/models/mia/` (the directory entry in `pubspec.yaml` already includes it) and map the garment id in `MiaLooks.topAssets`.
 

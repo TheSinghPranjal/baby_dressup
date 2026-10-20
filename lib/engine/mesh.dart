@@ -15,8 +15,8 @@ class Mesh {
   final Int32List? colors;
 
   /// Optional UV coordinates, two floats per vertex. V = 0 is the top of the
-  /// texture, matching Flutter's [ImageShader] (glTF's bottom-left origin is
-  /// flipped when a model is loaded).
+  /// texture, matching Flutter's [ImageShader]. Mia's GLBs already use that
+  /// origin, so the GLB loader stores TEXCOORD_0 unchanged.
   final Float32List? uvs;
 
   Mesh(this.positions, this.normals, this.indices, [this.colors, this.uvs]);
