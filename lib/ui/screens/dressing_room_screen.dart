@@ -49,7 +49,8 @@ class _DressingRoomScreenState extends State<DressingRoomScreen> {
     if (_scene != null) return;
     _s = AppScope.of(context);
     _editing = widget.editing;
-    _scene = DressingScene(_s.assembler, dolls: _s.dolls, showEnvironment: _s.settings.showBackground)
+    _scene = DressingScene(_s.assembler,
+        dolls: _s.dolls, models: _s.models, showEnvironment: _s.settings.showBackground)
       ..autoRotate = _s.settings.autoRotate;
     _scene!.show(_w.state, _w.character);
     if (widget.greet) _scene!.animator.waveHello();
@@ -284,7 +285,8 @@ class _DressingRoomScreenState extends State<DressingRoomScreen> {
           top: 8,
           child: Column(
             children: [
-              // Paper dolls have one painted pose and no back view.
+              // Paper dolls have one painted pose and no back view. GLB looks
+              // can turn, but the files are not rigged, so poses stay hidden.
               if (!scene.isFlat)
                 _RoundButton(
                   key: const Key('auto-rotate'),
@@ -294,7 +296,7 @@ class _DressingRoomScreenState extends State<DressingRoomScreen> {
                   onTap: () => setState(() => scene.autoRotate = !scene.autoRotate),
                 ),
               _RoundButton(icon: Icons.center_focus_strong_rounded, tooltip: 'Reset camera', onTap: scene.resetCamera),
-              if (!scene.isFlat)
+              if (!scene.isFlat && !scene.isModel)
                 _RoundButton(key: const Key('open-poses'), icon: Icons.accessibility_new_rounded, tooltip: 'Pose', onTap: _pickPose),
               _RoundButton(key: const Key('open-backgrounds'), icon: Icons.landscape_rounded, tooltip: 'Background', onTap: _pickBackground),
               _RoundButton(key: _shareKey, icon: Icons.ios_share_rounded, tooltip: 'Share picture', onTap: _share),

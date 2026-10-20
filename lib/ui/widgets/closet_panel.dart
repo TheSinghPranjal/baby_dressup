@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../app.dart';
+import '../../models/mia_looks.dart';
 import '../../scene/character_assembler.dart';
 import '../../wardrobe/garment.dart';
 import '../../wardrobe/wardrobe_manager.dart';
@@ -143,8 +144,13 @@ class _VariantStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final shown =
-        AppScope.maybeOf(context)?.dolls.variantsFor(wardrobe.character, garment) ??
+    final scope = AppScope.maybeOf(context);
+    // Mia's GLBs are one painted colour, so the swatches would not change her.
+    if ((scope?.models.drives(wardrobe.state.characterId) ?? false) &&
+        MiaLooks.isModelledTop(garment.id)) {
+      return const SizedBox.shrink();
+    }
+    final shown = scope?.dolls.variantsFor(wardrobe.character, garment) ??
         List.generate(garment.variants.length, (i) => i);
     if (shown.length < 2) return const SizedBox.shrink();
     final selected = wardrobe.state.variantOf(garment.slot);

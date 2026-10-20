@@ -37,6 +37,28 @@
 
 Add a `CharacterDefinition` to `kCharacters`. Give her a skin tone, eye, hair, brow and lip colours, and a `FaceStyle` (eye size and tilt, brows, freckles, blush, smile). Also give her a `defaultOutfit` that covers at least `top`, `bottom`, `hair` and `shoes`. The catalogue test checks these entries.
 
+## Mia's whole-body GLBs
+
+`assets/models/mia/` holds one GLB per look. The loader is `lib/engine/gltf.dart`; the closet mapping is `lib/models/mia_looks.dart`.
+
+- Y-up, facing +Z, feet at y = 0, 1.0 unit tall, centred on X/Z. The dressing room scales her by `MiaLooks.worldScale` (1.6) so she matches the other characters. Do not bake that scale into the file.
+- One material, one embedded base-color image. No skeleton. A rigged file would be drawn in its bind pose.
+- UVs use the glTF bottom-left origin; the loader flips V.
+
+To add a top, export `some_top.glb` into that folder, add the path under `assets/models/mia/` (the directory entry in `pubspec.yaml` already includes it) and map the garment id in `MiaLooks.topAssets`.
+
+To add a bottom later, do not replace the top-only file. Add a combo instead:
+
+```dart
+static const comboAssets = <String, String>{
+  'top_hoodie|bottom_flare_jeans': 'assets/models/mia/hoodie_flare.glb',
+};
+```
+
+`MiaLooks.assetFor` checks `topOrOuterId|bottomId` first, then the top-only file, then `default.glb`. Outerwear is chosen over the tee when both ids have a model.
+
+Tops with no entry are hidden for Mia while the models are loaded. Other characters never consult this map.
+
 ## Replacing placeholders with real models
 
 Gameplay code only deals with `Part`s: a mesh bound to a bone. To use real art:
@@ -46,7 +68,7 @@ Gameplay code only deals with `Part`s: a mesh bound to a bone. To use real art:
 3. Write a loader for your chosen format (OBJ or glTF) that produces `Mesh(positions, normals, indices, colors)`. The `build` function can then return `Part`s made from the loaded meshes. Nothing in `WardrobeManager`, the closet UI, saving or the renderer needs to change.
 4. Keep the `id`, slot and `hides` tags the same, so saved looks and masking keep working.
 
-The current engine uses vertex colours, not textures. Supporting textured meshes would need UVs and a texture-shader path in `SoftRenderer`; the planned approach is `ImageShader` together with `Vertices.raw(textureCoordinates:)`.
+Procedural garments still use vertex colours. Textured meshes (Mia's GLBs) go through the same `SoftRenderer`: it depth-sorts triangles, then draws each run that shares an image with `ImageShader` and `Vertices.raw(textureCoordinates:)`, modulating the texture by a soft wrap light. UVs are stored on `Mesh.uvs` with V = 0 at the top of the image.
 
 ## Paper-doll (2D) characters
 

@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 
 import 'doll/doll_art.dart';
+import 'models/mia_availability.dart';
+import 'models/mia_model_library.dart';
 import 'persistence/outfit_save_service.dart';
 import 'persistence/settings_service.dart';
 import 'scene/character_assembler.dart';
 import 'ui/screens/main_menu_screen.dart';
 import 'ui/theme.dart';
 import 'wardrobe/catalog.dart';
+import 'wardrobe/garment.dart';
 import 'wardrobe/wardrobe_manager.dart';
 
 /// Long-lived services shared by every screen.
@@ -17,17 +20,38 @@ class AppServices {
   final OutfitSaveService saves;
   final SettingsService settings;
   final DollLibrary dolls;
+  final MiaModelLibrary models;
 
   AppServices({
     required this.catalog,
     required this.saves,
     required this.settings,
     DollLibrary? dolls,
-  })  : dolls = dolls ?? DollLibrary.empty(),
-        assembler = CharacterAssembler(catalog),
-        wardrobe = WardrobeManager(catalog: catalog, available: dolls?.supports) {
+    MiaModelLibrary? models,
+  }) : dolls = dolls ?? DollLibrary.empty(),
+       models = models ?? MiaModelLibrary.empty(),
+       assembler = CharacterAssembler(catalog),
+       wardrobe = WardrobeManager(
+         catalog: catalog,
+         available: _availability(
+           dolls ?? DollLibrary.empty(),
+           models ?? MiaModelLibrary.empty(),
+         ),
+       ) {
     wardrobe.savedLookCount = saves.looks.length;
     saves.addListener(() => wardrobe.savedLookCount = saves.looks.length);
+  }
+
+  static bool Function(String, GarmentDefinition) _availability(
+    DollLibrary dolls,
+    MiaModelLibrary models,
+  ) {
+    return (id, g) => characterItemAvailable(
+      dolls: dolls,
+      models: models,
+      characterId: id,
+      garment: g,
+    );
   }
 }
 
